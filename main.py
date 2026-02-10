@@ -1,32 +1,33 @@
 import flet as ft
 import datetime
-import threading
-import time
+import asyncio  # 引入异步库，替代 threading
 
 
-def main(page: ft.Page):
-    # --- 1. 窗口基础设置 ---
+# 必须改为 async main
+async def main(page: ft.Page):
+    # --- 1. 窗口与设备适配设置 ---
     page.title = "Calculator"
     page.bgcolor = "#FFFFFF"
-    page.window_width = 390
-    page.window_height = 844
     page.padding = 0
+    page.theme_mode = ft.ThemeMode.LIGHT  # 强制亮色模式，避免系统深色模式影响
+
+    # 移除桌面端的 window 设置，手机会自动全屏
+    # page.window_width = ... (不需要)
 
     # --- 2. 核心逻辑状态 ---
     state = {
         "display": "0",
         "last_button": None,
-        "hidden_mode": False,  # 是否激活秘密模式
-        "hidden_inputs": [],  # 存储秘密输入的数字
-        "is_locked": False,  # 是否处于锁屏状态
-        "total_sum": 0,  # 秘密数字的总和
+        "hidden_mode": False,
+        "hidden_inputs": [],
+        "is_locked": False,
+        "total_sum": 0,
         "waiting_for_new_input": False,
         "auto_update_running": False
     }
 
-    # --- 3. 核心计算与功能函数 ---
+    # --- 3. 核心计算与功能函数 (异步化) ---
 
-    # [功能] 获取当前时间代码
     def get_time_code():
         now = datetime.datetime.now()
         if now.second >= 30:
@@ -36,54 +37,47 @@ def main(page: ft.Page):
         time_str = f"{target_time.month}{target_time.day:02d}{target_time.hour:02d}{target_time.minute:02d}"
         return int(time_str)
 
-    # [功能] 自动更新任务 (后台线程)
-    def auto_update_task():
+    # 异步更新任务
+    async def auto_update_task():
         while state["auto_update_running"]:
             target_val = get_time_code() - state["total_sum"]
             if state["display"] != str(target_val):
                 state["display"] = str(target_val)
-                # 必须在主线程更新 UI
                 display_text.value = state["display"]
-                page.update()
-            time.sleep(1)
+                await page.update_async()  # 异步更新 UI
+            await asyncio.sleep(1)  # 非阻塞等待
 
-    # [功能] 触发乱跳逻辑 (封装成函数，供按钮和背景使用)
-    def trigger_random_jump():
+    # 触发乱跳逻辑
+    async def trigger_random_jump():
         if state["is_locked"]:
             if not state["auto_update_running"]:
                 state["auto_update_running"] = True
-                # 立即跳动一次
                 state["display"] = str(get_time_code() - state["total_sum"])
-                update_display()
-                # 启动后台线程
-                threading.Thread(target=auto_update_task, daemon=True).start()
+                await update_display()
+                # 启动后台异步任务
+                asyncio.create_task(auto_update_task())
 
-    # --- 4. 交互事件处理 ---
+    # --- 4. 交互事件处理 (Async) ---
 
-    def on_button_click(e):
+    async def on_button_click(e):
         data = e.control.data
 
-        # [逻辑 A] 锁死模式 (关键修改！)
-        # 不再通过遮罩拦截，而是直接在这里判断
+        # [逻辑 A] 锁死模式
         if state["is_locked"]:
             if data == "=":
-                # === 点击等号：揭秘 ===
                 state["auto_update_running"] = False
-                state["display"] = str(get_time_code())  # 显示最终时间
-                # 此时依然保持 is_locked = True，等待用户看够了自己退出或重置
-                # 如果你想按等号后解锁，可以在这里加 state["is_locked"] = False
-                update_display()
+                state["display"] = str(get_time_code())
+                await update_display()
             else:
-                # === 点击其他任何按钮：触发乱跳 ===
-                trigger_random_jump()
+                await trigger_random_jump()
             return
 
-        # [逻辑 B] 激活秘密模式 (双击 .)
+        # [逻辑 B] 激活秘密模式
         if data == "." and state["last_button"] == ".":
             state["hidden_mode"] = True
             state["display"] = "0"
             state["hidden_inputs"] = []
-            update_display()
+            await update_display()
             return
 
         # [逻辑 C] 秘密模式输入
@@ -95,13 +89,11 @@ def main(page: ft.Page):
                     pass
                 current_total = sum(state["hidden_inputs"])
 
-                # 第三次按加号 -> 进入锁屏
                 if len(state["hidden_inputs"]) == 3:
                     state["total_sum"] = int(current_total)
                     state["display"] = str(state["total_sum"])
                     state["is_locked"] = True
-                    # 这里不需要再显示任何 overlay 了，逻辑锁已生效
-                    page.update()
+                    await page.update_async()
                 else:
                     state["display"] = str(int(current_total))
                     state["waiting_for_new_input"] = True
@@ -130,18 +122,21 @@ def main(page: ft.Page):
                     state["display"] += data
 
         state["last_button"] = data
-        update_display()
+        await update_display()
 
-    # 背景点击事件 (处理点击按钮之间的空白处)
-    def on_background_tap(e):
-        # 点击空白处也触发乱跳
-        trigger_random_jump()
+    async def on_background_tap(e):
+        await trigger_random_jump()
 
-    def update_display():
+    async def update_display():
         display_text.value = state["display"]
-        page.update()
+        await page.update_async()
 
-    # --- 5. UI 构建 (由内向外) ---
+    # --- 5. UI 构建 (响应式布局) ---
+
+    # 动态计算按钮大小：(屏幕宽度 - 间距) / 4
+    # Vivo X200s 逻辑宽度约 390-412dp。我们留出左右各 20dp 的 padding，中间间距 15dp
+    # 4 * btn_size + 3 * 15 = (page.width - 40)
+    # 但 page.width 在初始化时可能不准，所以我们使用 Flexible 和 Row 的对齐来自动适应
 
     # 顶部导航
     header = ft.Container(
@@ -155,19 +150,17 @@ def main(page: ft.Page):
             ft.Container(expand=True),
             ft.IconButton(icon="add", icon_color="black", icon_size=28),
             ft.IconButton(icon="settings_outlined", icon_color="black", icon_size=24)
-        ], alignment=ft.MainAxisAlignment.START)
+        ])
     )
 
-    # 显示屏
-    display_text = ft.Text(value="0", color="black", size=65, weight="w400", text_align=ft.TextAlign.RIGHT)
+    display_text = ft.Text(value="0", color="black", size=70, weight="w400", text_align=ft.TextAlign.RIGHT)
     display_area = ft.Container(
         content=display_text,
         alignment=ft.alignment.bottom_right,
-        expand=True,
+        expand=True,  # 占据所有剩余空间
         padding=ft.padding.only(right=30, bottom=10)
     )
 
-    # 工具栏
     tools_row = ft.Container(
         padding=ft.padding.only(left=25, bottom=10),
         content=ft.Row([
@@ -176,72 +169,91 @@ def main(page: ft.Page):
         ], spacing=20)
     )
 
-    # 按钮生成器
+    # 按钮样式定义
     BG_NUM = "#F7F7F7"
     BG_OP_PINK = "#FFEBEE"
     BG_RED = "#F44336"
     TXT_RED = "#D32F2F"
     TXT_GREY = "#9E9E9E"
 
-    def btn(text, bg="#F7F7F7", color="black", data=None, size=80):
+    # 响应式按钮生成器：使用 expand=1 让按钮自动填满行，保持圆形
+    def btn(text, bg="#F7F7F7", color="black", data=None):
         font_size = 28
         if text in ["mc", "m+", "m-", "mr"]: font_size = 20
+
+        # 按钮容器
         return ft.Container(
             content=ft.Text(text, color=color, size=font_size, weight="w400"),
             alignment=ft.alignment.center,
-            width=size, height=size,
-            bgcolor=bg, border_radius=size / 2,
-            on_click=on_button_click, data=data or text, ink=True
+            bgcolor=bg,
+            shape=ft.BoxShape.CIRCLE,  # 强制保持圆形
+            on_click=on_button_click,
+            data=data or text,
+            ink=True,
+            aspect_ratio=1,  # 宽高比 1:1，保证是正圆
+            expand=1  # 在 Row 中自动伸缩
         )
 
     def icon_btn(icon_name, bg="#F7F7F7", color="#D32F2F", data=None):
         return ft.Container(
             content=ft.Icon(name=icon_name, color=color, size=28),
             alignment=ft.alignment.center,
-            width=80, height=80,
-            bgcolor=bg, border_radius=40,
-            on_click=on_button_click, data=data, ink=True
+            bgcolor=bg,
+            shape=ft.BoxShape.CIRCLE,
+            on_click=on_button_click,
+            data=data,
+            ink=True,
+            aspect_ratio=1,
+            expand=1
         )
 
-    # 键盘区域 (最关键的布局)
-    # 不再包含任何 clone 按钮，就是纯粹的布局
+    # 辅助函数：创建一行按钮，并添加间距
+    def btn_row(controls):
+        # 在按钮之间插入间隔
+        spaced_controls = []
+        for i, control in enumerate(controls):
+            spaced_controls.append(control)
+            if i < len(controls) - 1:
+                # 按钮之间的间距
+                spaced_controls.append(ft.Container(width=15))
+        return ft.Row(spaced_controls, alignment=ft.MainAxisAlignment.CENTER)
+
+    # 键盘布局
     keypad = ft.Container(
         padding=20,
         content=ft.Column([
-            ft.Row([btn("mc", "transparent", TXT_GREY), btn("m+", "transparent", TXT_GREY),
-                    btn("m-", "transparent", TXT_GREY), btn("mr", "transparent", TXT_GREY)], alignment="spaceBetween"),
-            ft.Row([btn("AC", BG_NUM, TXT_RED), icon_btn("backspace_outlined", BG_NUM, TXT_RED, "x"),
-                    btn("+/-", BG_NUM, TXT_RED), btn("÷", BG_OP_PINK, TXT_RED)], alignment="spaceBetween"),
-            ft.Row([btn("7", BG_NUM), btn("8", BG_NUM), btn("9", BG_NUM), btn("×", BG_OP_PINK, TXT_RED)],
-                   alignment="spaceBetween"),
-            ft.Row([btn("4", BG_NUM), btn("5", BG_NUM), btn("6", BG_NUM), btn("-", BG_OP_PINK, TXT_RED)],
-                   alignment="spaceBetween"),
-            ft.Row([btn("1", BG_NUM), btn("2", BG_NUM), btn("3", BG_NUM), btn("+", BG_OP_PINK, TXT_RED)],
-                   alignment="spaceBetween"),
-            ft.Row([btn("%", BG_NUM), btn("0", BG_NUM), btn(".", BG_NUM), btn("=", BG_RED, "white")],
-                   alignment="spaceBetween"),
-        ], spacing=12)
+            btn_row([btn("mc", "transparent", TXT_GREY), btn("m+", "transparent", TXT_GREY),
+                     btn("m-", "transparent", TXT_GREY), btn("mr", "transparent", TXT_GREY)]),
+            btn_row([btn("AC", BG_NUM, TXT_RED), icon_btn("backspace_outlined", BG_NUM, TXT_RED, "x"),
+                     btn("+/-", BG_NUM, TXT_RED), btn("÷", BG_OP_PINK, TXT_RED)]),
+            btn_row([btn("7", BG_NUM), btn("8", BG_NUM), btn("9", BG_NUM), btn("×", BG_OP_PINK, TXT_RED)]),
+            btn_row([btn("4", BG_NUM), btn("5", BG_NUM), btn("6", BG_NUM), btn("-", BG_OP_PINK, TXT_RED)]),
+            btn_row([btn("1", BG_NUM), btn("2", BG_NUM), btn("3", BG_NUM), btn("+", BG_OP_PINK, TXT_RED)]),
+            btn_row([btn("%", BG_NUM), btn("0", BG_NUM), btn(".", BG_NUM), btn("=", BG_RED, "white")]),
+        ], spacing=15)  # 行间距
     )
 
     # 组装主布局
     main_layout = ft.Column([
-        ft.Container(height=10),
         header,
         display_area,
         tools_row,
         keypad,
-        ft.Container(height=20)
+        # 底部留白，防止被手势条遮挡
+        ft.Container(height=10)
     ], expand=True)
 
-    # --- 6. 最终层级 ---
-    # 使用 GestureDetector 包裹整个页面，用于捕获点击空白处
-    # 按钮的点击事件会优先于 GestureDetector 触发
+    # --- 6. 最终层级 (使用 SafeArea) ---
+    # SafeArea 会自动避开摄像头挖孔和底部黑条
     page.add(
-        ft.GestureDetector(
-            on_tap=on_background_tap,  # 点击背景
-            content=ft.Container(
-                content=main_layout,
-                bgcolor="white",  # 确保有背景色以捕获点击
+        ft.SafeArea(
+            ft.GestureDetector(
+                on_tap=on_background_tap,
+                content=ft.Container(
+                    content=main_layout,
+                    bgcolor="white",
+                    expand=True
+                ),
                 expand=True
             ),
             expand=True
